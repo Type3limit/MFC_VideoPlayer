@@ -1,145 +1,60 @@
 ﻿#include "pch.h"
 #include "CMyVideoArea.h"
-#include "CMyBlockQueue.h"
 
-static CMyBlockQueue<HBITMAP> Global_BitMapQueue;
-static CMyBlockQueue <int> Global_DelayQueue;
+
+
 
 CMyVideoArea::CMyVideoArea() :
 	m_bThreadBegin(false), m_bThreadExit(false),
-	m_bThreadPause(false), m_nFrameRate(0),
+	m_bThreadPause(false), m_bIsFullScreen(false),
+	m_nImageHeight(0), m_nImageWidth(0),
 	m_pThreadRender(nullptr), m_bEndNormal(false),
 	m_pThreadPlay(nullptr)
 {
-	memset(m_cFilePath, 0, sizeof(m_cFilePath));
+	m_pPaintMutex = new CMutex(FALSE, NULL);
+
 }
 
 CMyVideoArea::~CMyVideoArea()
 {
-	if (m_pThreadRender)
-	{
-		if (m_bThreadPause)//若当前线程处于暂停态，则继续以便线程执行正常以释放内存
-		{
-			m_pThreadRender->ResumeThread();
-		}
-		PostThreadMessage(m_pThreadRender->m_nThreadID, WMU_STOP, 0, 0);
-
-		if (WAIT_TIMEOUT == WaitForSingleObject(m_pThreadRender->m_hThread, 125))//若仍存在，说明处于消费者阻塞态
-		{
-			//放一个值使其解除阻塞
-			if (!Global_DelayQueue.IsFull())
-			{
-				TRACE("Blocked,put something\n");
-				Global_DelayQueue.PutItem(0);
-			}
-			PostThreadMessage(m_pThreadRender->m_nThreadID, WMU_STOP, 0, 0);
-			WaitForSingleObject(m_pThreadRender->m_hThread, INFINITE);
-		}
-	}
-	TRACE("Render Thread Ended\n");
-
-	if (m_pThreadPlay)//释放解码线程
-	{
-		if (m_bThreadPause)//若当前线程处于暂停态，则继续以便线程执行正常以释放内存
-		{
-			m_pThreadPlay->ResumeThread();
-		}
-
-		PostThreadMessage(m_pThreadPlay->m_nThreadID, WMU_STOP, 0, 0);
-		if (WAIT_TIMEOUT == WaitForSingleObject(m_pThreadPlay->m_hThread, 125))//若仍存在，说明处于生产者阻塞态
-		{
-			//取消值使其解除阻塞。
-			if (!Global_BitMapQueue.IsEmpty())
-			{
-				TRACE("Blocked,remove bitmap handle\n");
-				Global_BitMapQueue.EmptyQueue();
-			}
-
-			if (!Global_DelayQueue.IsEmpty())
-			{
-				TRACE("Blocked,remove Delay \n");
-				Global_DelayQueue.EmptyQueue();
-			}
-
-
-			PostThreadMessage(m_pThreadPlay->m_nThreadID, WMU_STOP, 0, 0);
-			WaitForSingleObject(m_pThreadPlay->m_hThread, INFINITE);
-		}
-	}
-	TRACE("Work Thread Ended\n");
-	CleanUp();
-	TRACE("All threads over done.");
+	delete m_pPaintMutex;
+	TRACE("All threads over done.\n");
 }
 
 BEGIN_MESSAGE_MAP(CMyVideoArea, CStatic)
 	ON_WM_PAINT()
 	ON_WM_SIZE()
+	ON_MESSAGE(WMU_PLAY_ERROR, &CMyVideoArea::ErrorWarning)
 END_MESSAGE_MAP()
 
 void CMyVideoArea::OnPaint()
 {
-	
-	static LARGE_INTEGER dwCount = {0};
-	static LARGE_INTEGER frequency = {0};
+	GetWindowRect(&m_ScreenRect);
+	ScreenToClient(&m_ScreenRect);
 	CPaintDC pDC(this);
-	if (m_bThreadBegin && !m_bThreadPause)//已经开始解码并且未处于暂停态
+	CDC memDc;
+	memDc.CreateCompatibleDC(&pDC);
+	if (memDc)
 	{
-		QueryPerformanceFrequency(&frequency);
-		double quadpart = (double)frequency.QuadPart;
-		LARGE_INTEGER CurBuf;
-		QueryPerformanceCounter(&CurBuf);
-		double delay = (CurBuf.QuadPart - dwCount.QuadPart) / quadpart;
-		TRACE("Paint Depart with %lf,Bitmap has %d left\n", delay,Global_BitMapQueue.QueueSize());
-		QueryPerformanceCounter(&dwCount);
-
-		HBITMAP hBuf = NULL;
-		do {
-			hBuf = Global_BitMapQueue.TakeItemWithoutBlock();
-		} while (!hBuf || Global_BitMapQueue.IsEmpty());//直到取得一个非空buffer或当前已无帧图可用
-
-		if (!hBuf)//若仍为空，则说明无帧图可用，不进行绘制
-			return;
-
-		Global_DelayQueue.RemoveFront();
+		CBitmap memBitmap;
+		memBitmap.CreateCompatibleBitmap(&pDC, m_ScreenRect.Width(), m_ScreenRect.Height());
+		auto Cur = memDc.SelectObject(memBitmap);//将CBitmap的一位位图选出，避免高速绘制时的内存泄漏
+		
+		memDc.FillSolidRect(&m_ScreenRect, RGB(0, 0, 0));
+		memDc.SetStretchBltMode(HALFTONE);
 
 		if (!m_cImage.IsNull())
-			m_cImage.Destroy();
-
-		m_cImage.Attach(hBuf);
-
-		CDC memDc;
-		memDc.CreateCompatibleDC(&pDC);
-		if (memDc)
 		{
-			CBitmap memBitmap;
-			memBitmap.CreateCompatibleBitmap(&pDC, m_ScreenRect.Width(), m_ScreenRect.Height());
-			auto Cur = memDc.SelectObject(memBitmap);//将CBitmap的一位位图选出，避免高速绘制时的内存泄漏
-			memDc.FillSolidRect(&m_ScreenRect, RGB(0, 0, 0));
-			memDc.SetStretchBltMode(HALFTONE);
+			m_pPaintMutex->Lock();
 			m_cImage.Draw(memDc, m_DrawRect, m_ImageRect);
-			
-			pDC.BitBlt(0, 0, m_ScreenRect.Width(), m_ScreenRect.Height(), &memDc, 0, 0, SRCCOPY);
-			memBitmap.DeleteObject();
-			DeleteObject(Cur);//释放选出的位图
+			m_pPaintMutex->Unlock();
 		}
-		memDc.DeleteDC();
-		Global_BitMapQueue.RemoveFront();
-	}
 
-	else if (m_bThreadBegin && m_bThreadPause)//已开始解码但处于暂停态
-	{
-		pDC.FillSolidRect(m_ScreenRect, RGB(0, 0, 0));//仅单图无双缓冲必要，直接使用黑背景掩盖
-		pDC.SetStretchBltMode(HALFTONE);
-		m_cImage.Draw(pDC, m_DrawRect, m_ImageRect);
+		pDC.BitBlt(0, 0, m_ScreenRect.Width(), m_ScreenRect.Height(), &memDc, 0, 0, SRCCOPY);
+		memBitmap.DeleteObject();
+		DeleteObject(Cur);//释放选出的位图
 	}
-
-	else//其他状态时统一使用黑色背景
-	{
-		GetWindowRect(&m_ScreenRect);
-		ScreenToClient(m_ScreenRect);
-		pDC.FillSolidRect(m_ScreenRect, RGB(0, 0, 0));
-	}
-	ReleaseDC(&pDC);
+	memDc.DeleteDC();
 }
 
 void CMyVideoArea::OnSize(UINT nType, int cx, int cy)
@@ -155,94 +70,102 @@ int CMyVideoArea::FFmpegplayer()
 
 #pragma region InitalizeRegion
 
-	AVFormatContext* m_pFormatCtx;
-	int m_nVideoIndex, m_nAudioIndex;
-	AVCodecContext* m_pCodecCtx;
-	AVCodec* m_pCodec;
-	AVFrame* m_pFrame, * m_pFrameRGB;
-	uint8_t* m_pOutBufferRGB;
+	AVFormatContext* pFormatCtx;
+	int nVideoIndex, nAudioIndex;
+	AVCodecContext* pCodecCtx;
+	AVCodec* pCodec;
+	AVFrame* pFrame, * pFrameRGB;
+	uint8_t* pOutBufferRGB;
 
-	AVPacket* m_pPacket;
-	AVStream* m_pStream;
-	int m_nRet = 0, m_nGotPicture = 0;
+	AVPacket* pPacket;
+	AVStream* pStream;
+	int nRet = 0, nGotPicture = 0;
+	struct SwsContext* pImgConvertCtx;
 
-	struct SwsContext* m_pImgConvertCtx;
+	int nReturnValue = EXIT_NORMAL;
 
 	avformat_network_init();
-	m_pFormatCtx = avformat_alloc_context();
+	pFormatCtx = avformat_alloc_context();
 
 	TRACE("Work Thread Beagin!\n");
-	if (avformat_open_input(&m_pFormatCtx, m_cFilePath, NULL, NULL) != 0) //打开视频文件
+	if (avformat_open_input(&pFormatCtx, (LPCSTR)m_cFileName, NULL, NULL) != 0) //打开视频文件
 	{
-		AfxMessageBox(_T("Couldn't open input stream.\n"));
-		
+		m_cExceptionStr.Format(_T("Couldn't open input stream.\n"));
+		nReturnValue = EXIT_EXCPTION;
 	}
-	if (avformat_find_stream_info(m_pFormatCtx, NULL) < 0) //找到视频流
+	if (avformat_find_stream_info(pFormatCtx, NULL) < 0) //找到视频流
 	{
-		AfxMessageBox(_T("Couldn't find stream information.\n"));
-		
+		m_cExceptionStr.Format(_T("Couldn't find stream information.\n"));
+		nReturnValue = EXIT_EXCPTION;
 	}
-	m_nVideoIndex = -1;
-	m_nAudioIndex = -1;
-	for (unsigned int i = 0; i < m_pFormatCtx->nb_streams; i++) //找到类型对应的流
+	nVideoIndex = -1;
+	nAudioIndex = -1;
+	for (unsigned int i = 0; i < pFormatCtx->nb_streams; i++) //找到类型对应的流
 	{
-		if (m_pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)//视频流
-			m_nVideoIndex = i;
-		if (m_pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)//音频流
-			m_nAudioIndex = i;
+		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)//视频流
+			nVideoIndex = i;
+		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)//音频流
+			nAudioIndex = i;
 	}
 
-	if (m_nVideoIndex == -1) {
-		AfxMessageBox(_T("Didn't find a video stream.\n"));//未找到视频流
-		
+	if (nVideoIndex == -1) {
+
+		m_cExceptionStr.Format(_T("Didn't find a video stream.\n"));//未找到视频流
+		nReturnValue = EXIT_EXCPTION;
 	}
-	//if (m_nAudioIndex == -1)
-	//{
-	//	AfxMessageBox(_T("Didn't find a audio stream.\n"));//未找到音频流（本程序暂无音频播放能力）
-	//	return EXIT_EXCPTION;
-	//}
-	m_pCodecCtx = avcodec_alloc_context3(NULL);
-	if (m_pCodecCtx == NULL)
+	if (nAudioIndex == -1)
 	{
-		AfxMessageBox(_T("codec context alloc failed!"));
+		m_cExceptionStr.Format(_T("Didn't find a audio stream.\n"));//未找到音频流（本程序暂无音频播放能力）
+		nReturnValue = EXIT_EXCPTION;
+	}
+	pCodecCtx = avcodec_alloc_context3(NULL);
+	if (pCodecCtx == NULL)
+	{
+		m_cExceptionStr.Format(_T("codec context alloc failed!"));
+		nReturnValue = EXIT_EXCPTION;
 
 	}
-	avcodec_parameters_to_context(m_pCodecCtx, m_pFormatCtx->streams[m_nVideoIndex]->codecpar);
+	avcodec_parameters_to_context(pCodecCtx, pFormatCtx->streams[nVideoIndex]->codecpar);
 
-	m_pCodec = avcodec_find_decoder(m_pCodecCtx->codec_id);//根据上下文找到编解码器，软解
+	pCodec = avcodec_find_decoder(pCodecCtx->codec_id);//根据上下文找到编解码器，软解
 	//m_pCodec = avcodec_find_decoder_by_name("h264_mediacodec");//硬解码
-	if (m_pCodec == NULL) {
-		AfxMessageBox(_T("Codec not found.\n"));
-		
+	if (pCodec == NULL) {
+		m_cExceptionStr.Format(_T("Codec not found.\n"));
+		nReturnValue = EXIT_EXCPTION;
 	}
-	if (avcodec_open2(m_pCodecCtx, m_pCodec, NULL) < 0) //打开编解码器
+	if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) //打开编解码器
 	{
-		AfxMessageBox(_T("Could not open codec.\n"));
-		
+		m_cExceptionStr.Format(_T("Could not open codec.\n"));
+		nReturnValue = EXIT_EXCPTION;
 	}
-	m_pFrame = av_frame_alloc();
-	m_pFrameRGB = av_frame_alloc();
-	
+	pFrame = av_frame_alloc();
+	pFrameRGB = av_frame_alloc();
 
-	if (m_pFrame == NULL || m_pFrameRGB == NULL)
-		AfxMessageBox(_T("Frame alloc failed!"));
 
-	
-	m_pOutBufferRGB = (uint8_t*)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_BGR24, m_pCodecCtx->width, m_pCodecCtx->height,1));
-	av_image_fill_arrays(m_pFrameRGB->data, m_pFrameRGB->linesize,
-		m_pOutBufferRGB, AV_PIX_FMT_BGR24, m_pCodecCtx->width, m_pCodecCtx->height, 1);
+	if (pFrame == NULL || pFrameRGB == NULL)
+	{
+		m_cExceptionStr.Format(_T("Frame alloc failed!"));
+		nReturnValue = EXIT_EXCPTION;
+	}
+
+
+
+	pOutBufferRGB = (uint8_t*)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_BGR24, pCodecCtx->width, pCodecCtx->height, 1));
+	av_image_fill_arrays(pFrameRGB->data, pFrameRGB->linesize,
+		pOutBufferRGB, AV_PIX_FMT_BGR24, pCodecCtx->width, pCodecCtx->height, 1);
 
 	//调整绘制区
-	m_nImageWidth = m_pCodecCtx->width;
-	m_nImageHeight = m_pCodecCtx->height;
+	m_nImageWidth = pCodecCtx->width;
+	m_nImageHeight = pCodecCtx->height;
+
 	AdjustDrawRect();
 
 	//设置图形转换的上下文
-	m_pImgConvertCtx = sws_getContext(m_pCodecCtx->width, m_pCodecCtx->height, m_pCodecCtx->pix_fmt,
-			  m_pCodecCtx->width, m_pCodecCtx->height, AV_PIX_FMT_BGR24, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+	pImgConvertCtx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt,
+		pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_BGR24, SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
-	m_pStream = m_pFormatCtx->streams[m_nVideoIndex];
-	m_pPacket = (AVPacket*)av_malloc(sizeof(AVPacket));
+	pStream = pFormatCtx->streams[nVideoIndex];
+	pPacket = (AVPacket*)av_malloc(sizeof(AVPacket));
 
 	uint64_t uiBasePts = AV_NOPTS_VALUE;
 	double fLastPTS = 0.0;
@@ -250,39 +173,37 @@ int CMyVideoArea::FFmpegplayer()
 	double FrameTime = 0.0;
 	int Delay = 0;
 	double diff = 0.0;
-	
-	MSG msg;
 #pragma endregion
 
-//每次循环读入一个包
-	while (!PeekMessage(&msg, NULL, WMU_STOP, WMU_STOP, PM_NOREMOVE))
+	//每次循环读入一个包
+	while (!m_bThreadExit && nReturnValue == EXIT_NORMAL)
 	{
-		
-		if (av_read_frame(m_pFormatCtx, m_pPacket) >= 0)
+		if (av_read_frame(pFormatCtx, pPacket) >= 0)
 		{
-			if (m_pPacket->stream_index == m_nVideoIndex)
+			if (pPacket->stream_index == nVideoIndex)
 			{
-				m_nRet = avcodec_send_packet(m_pCodecCtx, m_pPacket);
-					
-				if (m_nRet != 0) {
-					AfxMessageBox(_T("Decode Error%d.\n"),m_nRet);
-					
+				nRet = avcodec_send_packet(pCodecCtx, pPacket);
+
+				if (nRet != 0) {
+					m_cExceptionStr.Format(_T("Decode Error%d.\n"), nRet);
+					nReturnValue = EXIT_EXCPTION;
+
 				}
-				while ((m_nRet = avcodec_receive_frame(m_pCodecCtx, m_pFrame)) == 0)
+				while ((nRet = avcodec_receive_frame(pCodecCtx, pFrame)) == 0)
 				{
 					//获得延时
-					if (m_pPacket->dts != AV_NOPTS_VALUE)//若dts可用，取当前的帧的dts
+					if (pPacket->dts != AV_NOPTS_VALUE)//若dts可用，取当前的帧的dts
 					{
-						CurPts = m_pPacket->dts;
+						CurPts = pPacket->dts;
 					}
-					else if (m_pPacket->dts == AV_NOPTS_VALUE &&
-						m_pFrame->opaque && *(uint64_t*)m_pFrame->opaque != AV_NOPTS_VALUE)//dts不可用，则同步到外部（因无音频，暂不可用）
+					else if (pPacket->dts == AV_NOPTS_VALUE &&
+						pFrame->opaque && *(uint64_t*)pFrame->opaque != AV_NOPTS_VALUE)//dts不可用，则同步到外部（因无音频，暂不可用）
 					{
-						CurPts = *((uint64_t*)m_pFrame->opaque);
+						CurPts = *((uint64_t*)pFrame->opaque);
 					}
 					else//否则使用当前帧的pts
-						CurPts = m_pPacket->pts;
-					FrameTime = CurPts * av_q2d(m_pFormatCtx->streams[m_nVideoIndex]->time_base);
+						CurPts = pPacket->pts;
+					FrameTime = CurPts * av_q2d(pFormatCtx->streams[nVideoIndex]->time_base);
 					if (FrameTime > 0.0)
 					{
 						diff = FrameTime - fLastPTS;
@@ -290,98 +211,67 @@ int CMyVideoArea::FFmpegplayer()
 						fLastPTS = FrameTime;
 					}
 
-					sws_scale(m_pImgConvertCtx,
-						(const uint8_t* const*)m_pFrame->data,
-						m_pFrame->linesize,
-						0, m_pCodecCtx->height,
-						m_pFrameRGB->data, m_pFrameRGB->linesize);
+					sws_scale(pImgConvertCtx,
+						(const uint8_t* const*)pFrame->data,
+						pFrame->linesize,
+						0, pCodecCtx->height,
+						pFrameRGB->data, pFrameRGB->linesize);
 
-					
-					
-					RestoreInBmp(m_pFrameRGB, m_pFrame->width, m_pFrame->height, 24, Delay,m_pFrame->linesize);//将MetaData直接存为HBITMAP,24位深
-					//Sleep(Delay / 2);
+					RestoreMetaData(pFrameRGB, pFrame->width, pFrame->height, 24, Delay, pFrame->linesize);//将MetaData直接存为HBITMAP,24位深
 
-					//1.0 保证在降低cpu占用的同时有足够的帧供以绘制线程作时间控制
-					//1.1 利用满时阻塞可以更有效地降低CPU占用
-					
-					//av_free(tmpBuffer);
-					av_frame_unref(m_pFrame);
-					
-					//av_frame_unref(m_pFrameRGB);
+					av_frame_unref(pFrame);
 				}
 
 			}
-			av_packet_unref(m_pPacket);
+			av_packet_unref(pPacket);
 		}
 		else //正常结束，即视频包已被读完或读取视频包失败
 		{
-			m_bEndNormal = true;
-			if (m_pThreadRender)
+			if (m_ImageQueue.IsEmpty())
 			{
-				if (Global_DelayQueue.IsEmpty())
-				{
-					TRACE(_T("Vedio Normally End!\n"));
-					PostThreadMessage(m_pThreadRender->m_nThreadID, WMU_STOP, 0, 0);
-					WaitForSingleObject(m_pThreadRender, INFINITE);
-					CleanUp();
-					break;
-				}
-			}
-			else
-			{
-				TRACE(_T("Render thread ended before work thread.\n"));
-				CleanUp();
 				break;
-
 			}
 		}
-
 	}
 	//清理资源
-	sws_freeContext(m_pImgConvertCtx);
-	av_frame_free(&m_pFrameRGB);
-	av_frame_free(&m_pFrame);
+	sws_freeContext(pImgConvertCtx);
+	av_frame_free(&pFrameRGB);
+	av_frame_free(&pFrame);
+	avcodec_close(pCodecCtx);
+	avformat_close_input(&pFormatCtx);
+	avformat_free_context(pFormatCtx);
+	av_free(pOutBufferRGB);
+	LetRenderThreadEnd();
+	CleanUp();
+	TRACE("work thread ended\n");
+	::PostMessage(this->GetParent()->GetSafeHwnd(), WMU_PLAY_OVER, 0, 0);
 
-	avcodec_close(m_pCodecCtx);
-	avformat_close_input(&m_pFormatCtx);
-	avformat_free_context(m_pFormatCtx);
-
-	av_free(m_pOutBufferRGB);
-	//av_free(m_pOutBufferYUV);
-	TRACE("work thread normal ended\n");
-	::PostMessage(this->GetParent()->m_hWnd, WMU_PLAY_OVER, 0, 0);
-	if (!m_bEndNormal)
-		CleanUp();
-	return EXIT_NORMAL;
+	return nReturnValue;
 }
 
-void CMyVideoArea::RestoreInBmp(AVFrame* pFrame, int nWidth, int nHeight, int nBpp, int delay, int* padding)
+void CMyVideoArea::RestoreMetaData(AVFrame* pFrame, int nWidth, int nHeight, int nBpp, int Delay, int* padding)
 {
-	
 	int Delta = ((nWidth * 3) % 4 == 0) ? 0 : 4 - (nWidth * 3) % 4;
 	uint8_t* pBuffer = NULL;
 	if (Delta == 0)
 		goto RejudgeOver;
-	pBuffer = new uint8_t[(((nWidth * 3) + Delta) * nHeight)];
+	pBuffer = new uint8_t[((nWidth * 3) + Delta) * nHeight];
 	memset(pBuffer, 255, sizeof(pBuffer));
 	int nCurWidth = nWidth + Delta;
-	
 	uint8_t  R, G, B;
 	int i, j;
 	for (i = 0; i < nHeight; i++)
 	{
 		for (j = 0; j < nWidth; j++)
 		{
-				B = pFrame->data[0][3 * (nWidth * i + j) + 0 - i * Delta];			
-				G = pFrame->data[0][3 * (nWidth * i + j) + 1 - i * Delta];
-				R = pFrame->data[0][3 * (nWidth * i + j) + 2 - i * Delta];
-				pBuffer[3*(nWidth * i + j)] = B;
-			    pBuffer[3*(nWidth * i + j)+1] = G;
-			    pBuffer[3*(nWidth * i + j)+2] = R;	//BGR存储像素点信息
-
+			B = pFrame->data[0][3 * (nWidth * i + j) + 0 - i * Delta];
+			G = pFrame->data[0][3 * (nWidth * i + j) + 1 - i * Delta];
+			R = pFrame->data[0][3 * (nWidth * i + j) + 2 - i * Delta];
+			pBuffer[3 * (nWidth * i + j)] = B;
+			pBuffer[3 * (nWidth * i + j) + 1] = G;
+			pBuffer[3 * (nWidth * i + j) + 2] = R;	//BGR存储像素点信息
 		}
 	}
-
 RejudgeOver:
 	BITMAPFILEHEADER bmpheader;
 	BITMAPINFOHEADER bmpinfo;
@@ -389,52 +279,48 @@ RejudgeOver:
 	bmpheader.bfReserved1 = 0;
 	bmpheader.bfReserved2 = 0;
 	bmpheader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-	bmpheader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + (((nWidth * 3) + Delta)* nHeight);
-
+	bmpheader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + ((nWidth * 3) + Delta) * nHeight;
 	bmpinfo.biSize = sizeof(BITMAPINFOHEADER);
 	bmpinfo.biWidth = nWidth;
 	bmpinfo.biHeight = -nHeight;
 	bmpinfo.biPlanes = 1;
-	bmpinfo.biBitCount = nBpp;
+	bmpinfo.biBitCount = 24;
 	bmpinfo.biCompression = BI_RGB;
 	bmpinfo.biSizeImage = nWidth * nHeight;
-	bmpinfo.biXPelsPerMeter =0;
-	bmpinfo.biYPelsPerMeter =0;
+	bmpinfo.biXPelsPerMeter = 0;
+	bmpinfo.biYPelsPerMeter = 0;
 	bmpinfo.biClrUsed = 0;
 	bmpinfo.biClrImportant = 0;
 
 	CClientDC dc(this);
 
-
-	//char filename[30] = { 0 };
-	//sprintf_s(filename,"./RGB/RGBData%d.rgb", number++);
-	//FILE* pFileBGR;
-	//fopen_s(&pFileBGR, filename, "wb+");
-	//fwrite(pFrame->data[0], nWidth*nHeight*3, 1, pFileBGR);
-	//fclose(pFileBGR);
-
 	//创建设备相关位图，用于快速绘制，因DDB位图需要二次转换
-	HBITMAP hTemp = NULL;
-	if(Delta!=0)
-	 hTemp = CreateDIBitmap(dc.GetSafeHdc(),							//设备上下文的句柄 
-		(LPBITMAPINFOHEADER)&bmpinfo,				//位图信息头指针 
-		(long)CBM_INIT,								//初始化标志 
-		pBuffer,						//初始化数据指针 
-		(LPBITMAPINFO)&bmpinfo,						//位图信息指针 
-		DIB_RGB_COLORS);
+	HBITMAP hTemp = nullptr;
+
+	if (Delta != 0)
+	{
+		hTemp = CreateDIBitmap(dc.GetSafeHdc(),							//设备上下文的句柄 
+			(LPBITMAPINFOHEADER)&bmpinfo,				//位图信息头指针 
+			(long)CBM_INIT,								//初始化标志 
+			pBuffer,						//初始化数据指针 
+			(LPBITMAPINFO)&bmpinfo,						//位图信息指针 
+			DIB_RGB_COLORS);
+	}
 	else
-	 hTemp = CreateDIBitmap(dc.GetSafeHdc(),							//设备上下文的句柄 
+	{
+		hTemp = CreateDIBitmap(dc.GetSafeHdc(),							//设备上下文的句柄 
 			(LPBITMAPINFOHEADER)&bmpinfo,				//位图信息头指针 
 			(long)CBM_INIT,								//初始化标志 
 			pFrame->data[0],						//初始化数据指针 
 			(LPBITMAPINFO)&bmpinfo,						//位图信息指针 
 			DIB_RGB_COLORS);
-	if (hTemp != NULL)//避免空位图入队
-	{
-		Global_BitMapQueue.PutItem(hTemp);
-		Global_DelayQueue.PutItem(delay);
 	}
-	ReleaseDC(&dc);
+	if (hTemp != NULL)
+	{
+		CoverImage* CurBuf = new CoverImage(hTemp, Delay);
+		m_ImageQueue.PutItem(CurBuf);
+
+	}
 	delete[]pBuffer;
 }
 
@@ -535,27 +421,28 @@ void CMyVideoArea::AdjustDrawRect(bool model)
 
 }
 
-void CMyVideoArea::SetFile(LPCSTR lpParam)
+void CMyVideoArea::SetFile(CStringA  str)
 {
-	if (lpParam[0] == '\0')//简单校验
-	{
-		AfxMessageBox(L"文件名有误！");
-		return;
-	}
-	memset(m_cFilePath, 0, sizeof(m_cFilePath));
-	strcpy_s(m_cFilePath, lpParam);
+	if (!m_cFileName.IsEmpty())
+		m_cFileName.Empty();
+	m_cFileName = str;
 }
 
-UINT ThreadPlay(LPVOID lpParam)
+UINT CMyVideoArea::ThreadPlay(LPVOID lpParam)
 {
 	CMyVideoArea* MyArea = (CMyVideoArea*)lpParam;
 
-	MyArea->FFmpegplayer();
+	int n = MyArea->FFmpegplayer();
+	if (n == EXIT_EXCPTION)
+	{
+		MyArea->SendMessage(WMU_PLAY_ERROR, 0, 0);
+		MyArea->CleanUp();
+	}
 
-	return 0;
+	return n;
 }
 
-UINT ThreadRender(LPVOID lpParam)
+UINT CMyVideoArea::ThreadRender(LPVOID lpParam)
 {
 	CMyVideoArea* dlg = (CMyVideoArea*)lpParam;
 	dlg->RenderArea();
@@ -568,89 +455,28 @@ void CMyVideoArea::PlayBegin()
 	m_bEndNormal = false;
 	m_bThreadPause = false;
 	m_bThreadBegin = true;
-	Global_BitMapQueue.EmptyQueue();
-	Global_DelayQueue.EmptyQueue();
-	if (!m_pThreadPlay)
-		m_pThreadPlay = AfxBeginThread(ThreadPlay, this);//开启线程
-	if (!m_pThreadRender)
-		m_pThreadRender = AfxBeginThread(ThreadRender, this);
+	//开启线程
+	if (m_pThreadPlay != nullptr || m_pThreadRender != nullptr)
+	{
+		m_pThreadPlay = nullptr;
+		m_pThreadRender = nullptr;
+	}
+	m_pThreadPlay = AfxBeginThread(ThreadPlay, this);
+	m_pThreadRender = AfxBeginThread(ThreadRender, this);
 }
 
 void CMyVideoArea::PlayStop()
 {
-	if (m_pThreadRender)
-	{
-		if (m_bThreadPause)//若当前线程处于暂停态，则继续以便线程执行正常以释放内存
-		{
-			m_pThreadRender->ResumeThread();
-		}
-		PostThreadMessage(m_pThreadRender->m_nThreadID, WMU_STOP, 0, 0);
-
-		if (WAIT_TIMEOUT == WaitForSingleObject(m_pThreadRender->m_hThread, 125))//若仍存在，说明处于消费者阻塞态
-		{
-			//放一个值使其解除阻塞
-			if (!Global_DelayQueue.IsFull())
-			{
-				TRACE("Blocked,put something\n");
-				Global_DelayQueue.PutItem(0);
-			}
-			PostThreadMessage(m_pThreadRender->m_nThreadID, WMU_STOP, 0, 0);
-			WaitForSingleObject(m_pThreadRender->m_hThread, INFINITE);
-		}
-	}
-	TRACE("Force Render Thread Ended\n");
-
-	if (m_pThreadPlay)//释放解码线程
-	{
-		if (m_bThreadPause)//若当前线程处于暂停态，则继续以便线程执行正常以释放内存
-		{
-			m_pThreadPlay->ResumeThread();
-		}
-		PostThreadMessage(m_pThreadPlay->m_nThreadID, WMU_STOP, 0, 0);
-		if (WAIT_TIMEOUT == WaitForSingleObject(m_pThreadPlay->m_hThread, 125))
-		{
-			//取消值使其解除阻塞。
-			if (!Global_BitMapQueue.IsEmpty())
-			{
-				TRACE("Blocked,remove bitmap handle\n");
-				Global_BitMapQueue.EmptyQueue();
-			}
-			if (!Global_DelayQueue.IsEmpty())
-			{
-				TRACE("Blocked,remove Delay \n");
-				Global_DelayQueue.EmptyQueue();
-			}
-			PostThreadMessage(m_pThreadPlay->m_nThreadID, WMU_STOP, 0, 0);
-			WaitForSingleObject(m_pThreadPlay->m_hThread, INFINITE);
-		}
-	}
-	CleanUp();
-	TRACE("Force Work Thread Ended\n");
-	Invalidate();//更新为黑矩形
+	TRACE("force thread ended\n ");
+	if(m_bThreadBegin)
+	    LetAllThreadEnd();
+	m_bThreadBegin = false;
 }
 
 void CMyVideoArea::PlayPause()
 {
 	m_bThreadPause = !m_bThreadPause;
-	if (m_bThreadPause)
-	{
-		TRACE(_T("thread pause\n"));
-		m_pThreadPlay->SuspendThread();
-		m_pThreadRender->SuspendThread();
-
-	}
-	else
-	{
-		//从暂停态恢复，则释放资源
-		TRACE(_T("thread continue\n"));
-		if (!m_cImage.IsNull())
-			m_cImage.Destroy();
-		m_pThreadPlay->ResumeThread();
-		m_pThreadRender->ResumeThread();
-
-	}
-
-
+	m_bThreadPause? TRACE(_T("thread pause\n")):TRACE(_T("thread continue\n"));
 }
 
 void CMyVideoArea::SetFullScreen(bool bCurModel)
@@ -670,114 +496,176 @@ void CMyVideoArea::SetFullScreen(bool bCurModel)
 
 void CMyVideoArea::RenderArea()
 {
-	int Delay = 0;
-	MSG msg;
+	int  Delay = 0;
+
 	TRACE("Render Thread Begin\n");
-	while (!PeekMessage(&msg, NULL, WMU_STOP, WMU_STOP, PM_NOREMOVE))
+	while (!m_bEndNormal)
 	{
-		if (!Global_DelayQueue.IsEmpty())
+		if (!m_bThreadPause)
 		{
-			Delay = Global_DelayQueue.TakeItem();
-			
+
+			CoverImage* pCurBuf = m_ImageQueue.TakeItem();
+			Delay = pCurBuf->st_nDelay;
+
+			HBITMAP hBuf = nullptr;
+			hBuf = pCurBuf->Detach();
+			delete pCurBuf;
+
+			m_ImageQueue.RemoveFront();
+
+			m_pPaintMutex->Lock();
+
+			if (!m_cImage.IsNull())
+				m_cImage.Destroy();
+
+			if (hBuf != nullptr)
+				m_cImage.Attach(hBuf);
+
+			m_pPaintMutex->Unlock();
+
+			Invalidate();
+
+			Sleep(Delay);
 		}
-		if(Delay>18)
-		Sleep(Delay);
-		Invalidate();
+		else
+			Sleep(16);//mininum time spin
 	}
-	DeleteObject(msg.hwnd);
 	TRACE("render thread ended\n");
 }
 
 void CMyVideoArea::CleanUp()
 {
-
 	m_bThreadBegin = false;
 	m_bThreadPause = false;
 	m_bEndNormal = false;
+	m_bThreadExit = false;
 
-	if (m_pThreadPlay)
+	while (!m_ImageQueue.IsEmpty())
 	{
-		WaitForSingleObject(m_pThreadPlay, INFINITE);
+		CoverImage* pTmp = m_ImageQueue.TakeItemWithoutBlock();
+		DeleteObject(pTmp->Detach());
+		if (!pTmp)
+			delete pTmp;
+		m_ImageQueue.RemoveFront();
 	}
-	if (m_pThreadRender)
+	m_ImageQueue.EmptyQueue();
+	m_cImage.Destroy();
+	Invalidate();//更新为黑矩形
+}
+
+void CMyVideoArea::LetAllThreadEnd()
+{
+	LetRenderThreadEnd();
+	m_bThreadExit = true;
+	if (m_pThreadPlay != nullptr)//释放解码线程
 	{
-		WaitForSingleObject(m_pThreadRender, INFINITE);
+		if (WAIT_TIMEOUT == WaitForSingleObject(m_pThreadPlay->m_hThread, 125))//若仍存在，说明处于生产者阻塞态
+		{
+			TRACE("Blocked ,remove something\n");
+
+			while (!m_ImageQueue.IsEmpty())
+			{
+				CoverImage* pTmp = m_ImageQueue.TakeItemWithoutBlock();
+				DeleteObject(pTmp->Detach());
+				delete pTmp;
+				m_ImageQueue.RemoveFront();
+			}
+			WaitForSingleObject(m_pThreadPlay->m_hThread, INFINITE);
+		}
 	}
-	TRACE("In Clean Empty Queue\n");//清空队列
-	Global_DelayQueue.EmptyQueue();
-	Global_BitMapQueue.EmptyQueue();
+	TRACE("all threads should be stopped now \n");
+}
 
-	m_pThreadPlay = NULL;
-	m_pThreadRender = NULL;
-
+void CMyVideoArea::LetRenderThreadEnd()
+{
+	m_bEndNormal = true;
+	if (m_pThreadRender != nullptr)
+	{
+		if (m_bThreadPause)//若当前线程处于暂停态，则继续以便线程执行正常以释放内存
+		{
+			m_pThreadRender->ResumeThread();
+		}
+		if (WAIT_TIMEOUT == WaitForSingleObject(m_pThreadRender->m_hThread, 125))//若仍存在，说明处于消费者阻塞态
+		{
+			//放一个值使其解除阻塞
+			if (!m_ImageQueue.IsFull())
+			{
+				TRACE("Blocked,put something\n");
+				m_ImageQueue.PutItem(new CoverImage(nullptr, 0));
+			}
+			WaitForSingleObject(m_pThreadRender->m_hThread, INFINITE);
+		}
+	}
+	TRACE("render thread should be stopped now \n");
 }
 
 int CMyVideoArea::SaveYUVFrameToFile(AVFrame* frame, int width, int height, int flag)//Debug use
 {
-	
-		FILE* fileHandle;
-		int y, writeError;
-		char filename[32];
-		static int frameNumber = 0;
-		if (flag == 0)
-		{//src
-			sprintf_s(filename, "./YUVS/frameS%d.yuv", frameNumber);
-		}
-		else if (flag == 1)
-		{//dst
-			sprintf_s(filename, "./YUVD/frameD%d.yuv", frameNumber);
-		}
-		fopen_s(&fileHandle,filename, "wb+");
-		if (fileHandle == NULL)
+
+	FILE* fileHandle;
+	int y, writeError;
+	char filename[32];
+	static int frameNumber = 0;
+	if (flag == 0)
+	{//src
+		sprintf_s(filename, "./YUVS/frameS%d.yuv", frameNumber);
+	}
+	else if (flag == 1)
+	{//dst
+		sprintf_s(filename, "./YUVD/frameD%d.yuv", frameNumber);
+	}
+	fopen_s(&fileHandle, filename, "wb+");
+	if (fileHandle == NULL)
+	{
+		TRACE("Unable to open % s…\n", filename);
+		return 0;
+	}
+	/*Writing Y plane data to file.*/
+	for (y = 0; y < height; y++)
+	{
+		writeError = fwrite(frame->data[0] + y * frame->linesize[0], 1, width, fileHandle);
+		if (writeError != width)
 		{
-			TRACE("Unable to open % s…\n", filename);
+			TRACE("Unable to write Y plane data!\n");
 			return 0;
 		}
-		/*Writing Y plane data to file.*/
-		for (y = 0; y < height; y++)
+	}
+
+	/*Dividing by 2.*/
+	height >>= 1;
+	width >>= 1;
+
+	/*Writing U plane data to file.*/
+	for (y = 0; y < height; y++)
+	{
+		writeError = fwrite(frame->data[1] + y * frame->linesize[1], 1, width, fileHandle);
+		if (writeError != width)
 		{
-			writeError = fwrite(frame->data[0] + y * frame->linesize[0], 1, width, fileHandle);
-			if (writeError != width)
-			{
-				TRACE("Unable to write Y plane data!\n");
-				return 0;
-			}
+			TRACE("Unable to write U plane data!\n");
+			return 0;
 		}
+	}
 
-		/*Dividing by 2.*/
-		height >>= 1;
-		width >>= 1;
-
-		/*Writing U plane data to file.*/
-		for (y = 0; y < height; y++)
+	/*Writing V plane data to file.*/
+	for (y = 0; y < height; y++)
+	{
+		writeError = fwrite(frame->data[2] + y * frame->linesize[2], 1, width, fileHandle);
+		if (writeError != width)
 		{
-			writeError = fwrite(frame->data[1] + y * frame->linesize[1], 1, width, fileHandle);
-			if (writeError != width)
-			{
-				TRACE("Unable to write U plane data!\n");
-				return 0;
-			}
+			TRACE("Unable to write V plane data!\n");
+			return 0;
 		}
+	}
 
-		/*Writing V plane data to file.*/
-		for (y = 0; y < height; y++)
-		{
-			writeError = fwrite(frame->data[2] + y * frame->linesize[2], 1, width, fileHandle);
-			if (writeError != width)
-			{
-				TRACE("Unable to write V plane data!\n");
-				return 0;
-			}
-		}
-
-		fclose(fileHandle);
-		frameNumber++;
-		return 1;
+	fclose(fileHandle);
+	frameNumber++;
+	return 1;
 }
 
-bool CMyVideoArea::IsAllOver()
+LRESULT CMyVideoArea::ErrorWarning(WPARAM, LPARAM)
 {
-	if (m_pThreadPlay == NULL && m_pThreadRender == NULL)
-		return true;
-	return false;
+	AfxMessageBox(m_cExceptionStr, MB_OK);
+	TRACE("error happened\n");
+	m_cExceptionStr.Empty();
+	return 0UL;
 }

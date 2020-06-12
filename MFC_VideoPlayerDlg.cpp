@@ -53,16 +53,15 @@ END_MESSAGE_MAP()
 
 CMFCVideoPlayerDlg::CMFCVideoPlayerDlg(CWnd* pParent /*=nullptr*/)
 	: CDialog(IDD_MFC_VIDEOPLAYER_DIALOG, pParent), m_bIsFullScreen(false),
-	m_bIsPause(false), m_bHasBegin(false)
+	m_bIsPause(false), m_bHasBegin(false),m_bAlreadyEnded(false)
 {
-
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 }
 
 void CMFCVideoPlayerDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialog::DoDataExchange(pDX);
-	DDX_Control(pDX, IDC_EDIT1, m_url);
+	DDX_Control(pDX, IDC_EDIT1,m_FileUrlEdit);
 	DDX_Control(pDX, IDC_STARTBUTTON, m_StartButton);
 	DDX_Control(pDX, IDC_PAUSEBUTTON, m_PauseButton);
 	DDX_Control(pDX, IDC_FULLSCREENBUTTON, m_FullScreenButton);
@@ -95,6 +94,8 @@ BOOL CMFCVideoPlayerDlg::OnInitDialog()
 {
 	CDialog::OnInitDialog();
 
+	GetWindowRect(&m_cWindowRect);
+	ScreenToClient(&m_cWindowRect);
 	return TRUE;  // 除非将焦点设置到控件，否则返回 TRUE
 }
 
@@ -147,33 +148,26 @@ void CMFCVideoPlayerDlg::OnBnClickedFilebutton()
 {
 	CString FilePathName;
 	CString Filter = CString("视频文件|*.mp4;*.mpeg;*.avi;*.mkv;*.rmvb;*.wmv;*.flv||");
-	CFileDialog dlg(TRUE, L".", L"", OFN_HIDEREADONLY | OFN_READONLY, Filter,NULL);
-	if (dlg.DoModal() == IDOK) 
+
+	CFileDialog dlg(TRUE, L".", L"", OFN_HIDEREADONLY | OFN_READONLY, Filter, NULL);
+	if (dlg.DoModal() == IDOK)
 	{
 		FilePathName = dlg.GetPathName();
-		m_url.SetWindowText(FilePathName);
-		char FilePath[200] = { 0 };
-		GetWindowTextA(m_url.m_hWnd, FilePath, 200);
+		m_FileUrlEdit.SetWindowText(FilePathName);
+		CStringA FilePath;
+		GetWindowTextA(m_FileUrlEdit.m_hWnd, (LPSTR)(LPCSTR)FilePath, 200);
 		m_ScreenArea.SetFile(FilePath);
 		m_StartButton.EnableWindow(TRUE);
 
 	}
 	delete dlg;
 }
-
 void CMFCVideoPlayerDlg::OnBnClickedStartbutton()
 {
 	// TODO: 在此添加控件通知处理程序代码
-	static DWORD dwCount = 0;
-	if (GetTickCount() - dwCount < 100)//If click within 0.1s depart, do nothing, leave time for release resources;
-	{
-		return;
-	}
-	dwCount = GetTickCount();
-
 	if (!m_bHasBegin)
 	{
-		if (m_url.GetWindowTextLengthW() < 1)
+		if (m_FileUrlEdit.GetWindowTextLengthW() < 1)
 		{
 			AfxMessageBox(L"请输入文件名！");
 			return;
@@ -183,18 +177,25 @@ void CMFCVideoPlayerDlg::OnBnClickedStartbutton()
 		m_PauseButton.ShowWindow(SW_SHOW);
 		m_FullScreenButton.ShowWindow(SW_SHOW);
 		m_bIsPause = false;
+		m_bAlreadyEnded = false;
+		
 		m_PauseButton.SetWindowTextW(L"暂停");
 		m_StartButton.SetWindowTextW(L"停止播放");
 		m_FileButton.EnableWindow(FALSE);
-		m_url.EnableWindow(FALSE);
+		m_FileUrlEdit.EnableWindow(FALSE);
 	}
 	else
 	{
-		m_ScreenArea.PlayStop();//通过消息来更新界面，让资源完整释放后再响应用户操作
+	    m_ScreenArea.PlayStop();//通过消息来更新界面，让资源完整释放后再响应用户操作
+		m_bHasBegin = false;
+		m_PauseButton.ShowWindow(SW_HIDE);
+		m_FullScreenButton.ShowWindow(SW_HIDE);
+		m_StartButton.SetWindowTextW(L"开始播放");
+		m_FileButton.EnableWindow(TRUE);
+		m_FileUrlEdit.EnableWindow(TRUE);
 	}
 
 }
-
 
 void CMFCVideoPlayerDlg::OnSize(UINT nType, int cx, int cy)
 {
@@ -203,25 +204,18 @@ void CMFCVideoPlayerDlg::OnSize(UINT nType, int cx, int cy)
 	// TODO: 在此处添加消息处理程序代码
 }
 
-
 void CMFCVideoPlayerDlg::OnGetMinMaxInfo(MINMAXINFO* lpMMI)
 {
 	// TODO: 在此添加消息处理程序代码和/或调用默认值
-	lpMMI->ptMinTrackSize.x = 725;
-	lpMMI->ptMinTrackSize.y = 505;
+
+	lpMMI->ptMinTrackSize.x = m_cWindowRect.Width();
+	lpMMI->ptMinTrackSize.y = m_cWindowRect.Height();
 	CDialog::OnGetMinMaxInfo(lpMMI);
 }
-
 
 void CMFCVideoPlayerDlg::OnBnClickedPausebutton()
 {
 	// TODO: 在此添加控件通知处理程序代码
-	static DWORD dwCount = 0;
-	if (GetTickCount() - dwCount < 100)//If click within 0.1s depart, do nothing, leave time for release resources;
-	{
-		return;
-	}
-	dwCount = GetTickCount();
 
 	if (!m_bIsPause)
 	{
@@ -265,7 +259,7 @@ void CMFCVideoPlayerDlg::OnBnClickedFullscreenbutton()
 
 	m_FileButton.ShowWindow(SW_HIDE);
 	m_FullScreenButton.ShowWindow(SW_HIDE);
-	m_url.ShowWindow(SW_HIDE);
+	m_FileUrlEdit.ShowWindow(SW_HIDE);
 	m_PauseButton.ShowWindow(SW_HIDE);
 	m_StartButton.ShowWindow(SW_HIDE);
 }
@@ -286,39 +280,29 @@ BOOL CMFCVideoPlayerDlg::PreTranslateMessage(MSG* pMsg)
 			SetWindowPlacement(&m_stWpOld);
 			if (m_bHasBegin)
 			{
-			m_FullScreenButton.ShowWindow(SW_SHOW);
-			m_PauseButton.ShowWindow(SW_SHOW);
+				m_FullScreenButton.ShowWindow(SW_SHOW);
+				m_PauseButton.ShowWindow(SW_SHOW);
 			}
 			m_FileButton.ShowWindow(SW_SHOW);
-			m_url.ShowWindow(SW_SHOW);
+			m_FileUrlEdit.ShowWindow(SW_SHOW);
 			m_StartButton.ShowWindow(SW_SHOW);
-
-			return TRUE;
-		}
-		else
-		{
-			CMFCVideoPlayerDlg::OnCancel();
 			return TRUE;
 		}
 	}
 	return CDialog::PreTranslateMessage(pMsg);
 }
 
-
 void CMFCVideoPlayerDlg::OnCancel()
 {
 	if (IDOK == AfxMessageBox(L"Sure To Quit?", MB_OKCANCEL))
 	{
-		
 		m_ScreenArea.PlayStop();
-		//DestroyWindow();
-		EndDialog(IDCANCEL);
+        EndDialog(IDCANCEL);
 	}
 }
 
 void CMFCVideoPlayerDlg::OnOK()
 {
-	DestroyWindow();
 	EndDialog(IDOK);
 	return;
 }
@@ -328,14 +312,9 @@ void CMFCVideoPlayerDlg::OnClose()
 	OnCancel();
 }
 
-LRESULT CMFCVideoPlayerDlg::OnVideoPlayOver(WPARAM wParam,LPARAM lParam)
+LRESULT CMFCVideoPlayerDlg::OnVideoPlayOver(WPARAM wParam, LPARAM lParam)
 {
-	
-	m_bHasBegin = false;
-	m_PauseButton.ShowWindow(SW_HIDE);
-	m_FullScreenButton.ShowWindow(SW_HIDE);
-	m_StartButton.SetWindowTextW(L"开始播放");
-	m_FileButton.EnableWindow(TRUE);
-	m_url.EnableWindow(TRUE);
+	if(m_bHasBegin)
+        ::PostMessage(m_hWnd, WM_COMMAND, MAKEWPARAM(IDC_STARTBUTTON, BN_CLICKED), NULL);
 	return 0UL;
 }

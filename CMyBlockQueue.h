@@ -58,10 +58,8 @@ public:
 
 	void EmptyQueue()
 	{
-		std::unique_lock<std::mutex> lock(_Mutex);
+		std::lock_guard<std::mutex> lock(_Mutex);
 		_Queue.clear();
-		_Condvar_productor.wait(lock, [this] {return _Queue.empty(); });
-		_Condvar_consumer.wait(lock, [this] {return _Queue.empty(); });
 		_Condvar_productor.notify_all();
 	}
 

@@ -31,7 +31,8 @@ public:
 private:
 	bool m_bHasBegin;
 	bool m_bIsPause;
-
+	bool m_bAlreadyEnded;
+	CRect m_cWindowRect;
 // 实现
 protected:
 	HICON m_hIcon;
@@ -46,10 +47,9 @@ public:
 
 	afx_msg void OnBnClickedFilebutton();
 	// 文件路径
-	CEdit m_url;
+	CEdit m_FileUrlEdit;
 	CMyVideoArea m_ScreenArea;
 	WINDOWPLACEMENT m_stWpOld;
-	CEvent m_DrawEvent;
 	bool m_bIsFullScreen;
 	BOOL CMFCVideoPlayerDlg::PreTranslateMessage(MSG* pMsg); 
 public:
@@ -71,5 +71,4 @@ public:
 	CButton m_PauseButton;
 	CButton m_FullScreenButton;
 	CButton m_FileButton;
-	
 };
