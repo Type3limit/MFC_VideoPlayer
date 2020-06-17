@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "CMyVideoArea.h"
-
+#include <mmsystem.h>
+#pragma comment(lib,"Winmm.lib")
 
 
 
@@ -436,7 +437,7 @@ UINT CMyVideoArea::ThreadPlay(LPVOID lpParam)
 	if (n == EXIT_EXCPTION)
 	{
 		MyArea->SendMessage(WMU_PLAY_ERROR, 0, 0);
-		MyArea->CleanUp();
+		//MyArea->CleanUp();
 	}
 
 	return n;
@@ -497,39 +498,61 @@ void CMyVideoArea::SetFullScreen(bool bCurModel)
 void CMyVideoArea::RenderArea()
 {
 	int  Delay = 0;
+	TIMECAPS tc;
+	bool bOpenSuperModel = false;
+	if (timeGetDevCaps(&tc, sizeof(TIMECAPS)) != TIMERR_NOERROR)
+	{
+		m_cExceptionStr.Format(L"can't set time minimum!\n");
+		SendMessage(WMU_PLAY_ERROR, 0, 0);
+		return;
+	}
+	UINT nResolution = min(max(tc.wPeriodMin, 1), tc.wPeriodMax);
+	UINT nInterval = 100;
+	if (nInterval < nResolution)
+	{
+		nInterval = nResolution;
+	}
+	//设置定时最小分辨率
 
 	TRACE("Render Thread Begin\n");
 	while (!m_bEndNormal)
 	{
 		if (!m_bThreadPause)
 		{
-
 			CoverImage* pCurBuf = m_ImageQueue.TakeItem();
 			Delay = pCurBuf->st_nDelay;
+
+			if (Delay <= 18&&!bOpenSuperModel)
+			{
+				bOpenSuperModel = true;
+				timeBeginPeriod(nResolution);
+			}
 
 			HBITMAP hBuf = nullptr;
 			hBuf = pCurBuf->Detach();
 			delete pCurBuf;
-
-			m_ImageQueue.RemoveFront();
-
 			m_pPaintMutex->Lock();
-
 			if (!m_cImage.IsNull())
 				m_cImage.Destroy();
-
 			if (hBuf != nullptr)
 				m_cImage.Attach(hBuf);
-
 			m_pPaintMutex->Unlock();
-
+			m_ImageQueue.RemoveFront();
 			Invalidate();
-
 			Sleep(Delay);
 		}
 		else
-			Sleep(16);//mininum time spin
+		{
+			if (bOpenSuperModel)
+			{
+		     timeEndPeriod(nResolution);
+			 bOpenSuperModel = false;
+			}
+            Sleep(18);//mininum time spin
+		}
+			
 	}
+	timeEndPeriod(nResolution);
 	TRACE("render thread ended\n");
 }
 
